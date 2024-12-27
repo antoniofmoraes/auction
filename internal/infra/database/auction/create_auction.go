@@ -11,6 +11,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.uber.org/zap/zapcore"
 )
 
 type AuctionEntityMongo struct {
@@ -50,29 +51,33 @@ func (ar *AuctionRepository) CreateAuction(
 		logger.Error("Error trying to insert auction", err)
 		return internal_error.NewInternalServerError("Error trying to insert auction")
 	}
+	auctionEntity.Id = auctionRes.InsertedID.(string)
 
-	ar.SetExpiration(ctx, auctionRes.InsertedID.(string))
+	go ar.SetExpiration(ctx, auctionEntity) //auctionRes.InsertedID.(string))
 
 	return nil
 }
 
-func (ar *AuctionRepository) SetExpiration(ctx context.Context, auctionId string) {
-	go func(ctx context.Context, auctionId string) error {
-		duration, err := time.ParseDuration(os.Getenv("AUCTION_DURATION"))
-		if err != nil {
-			return err
-		}
-		time.Sleep(duration)
+func (ar *AuctionRepository) SetExpiration(ctx context.Context, auction *auction_entity.Auction) {
+	duration, err := time.ParseDuration(os.Getenv("AUCTION_DURATION"))
+	if err != nil {
+		logger.Error("Error trying to update auction status", err)
+	}
 
-		filter := bson.D{{Key: "_id", Value: auctionId}}
+	timer := time.NewTimer(duration)
+
+	select {
+	case <-timer.C:
+		filter := bson.D{{Key: "_id", Value: auction.Id}}
 		update := bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: 1}}}}
 
 		_, err = ar.Collection.UpdateOne(ctx, filter, update)
 		if err != nil {
-			log.Printf("Error trying to set auction expiration. ID: %s, error: %v", auctionId, err)
-			return err
+			log.Printf("Error trying to set auction expiration. ID: %s, error: %v", auction.Id, err)
 		}
-
-		return nil
-	}(ctx, auctionId)
+		logger.Info("Auction completed after interval", zapcore.Field{Key: "auction_id", Type: zapcore.StringType, String: auction.Id})
+		return
+	case <-ctx.Done():
+		return
+	}
 }
